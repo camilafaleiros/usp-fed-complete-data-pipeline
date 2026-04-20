@@ -1,99 +1,82 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+
+  env_file:
+    - .env
+
+  user: "${AIRFLOW_UID:-50000}:0"
+
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW_UID: "${AIRFLOW_UID:-50000}"
+
+  volumes:
+    - ./app:/opt/app
+    - ./app/data:/opt/app/data
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/logs:/opt/airflow/logs
+
+  depends_on:
+    postgres:
+      condition: service_healthy
 services:
+
   postgres:
-    image: postgres:18
-    container_name: postgres-app
+    image: postgres:15
+    container_name: ${POSTGRES_HOST}
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "${POSTGRES_PORTS}"
-    volumes:
-      - postgres_data:/var/lib/postgresql
-    networks:
-      - data-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
-      timeout: 5s
-      retries: 10
-
-  ingestion:
-    build:
-      context: ./app/
-      dockerfile: src/ingestion/Dockerfile
-    container_name: ingestion-app
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - data-network
-    volumes:
-      - app_data:/app/data
-    env_file:
-      - .env
-
-  transform:
-    container_name: dbt-transform
-    build:
-      context: ./app/
-      dockerfile: src/incomes_dbt/Dockerfile
-    env_file:
-      - .env
-    volumes:
-      - ./app/src/incomes_dbt:/app/dbt
-    environment:
-      - DBT_PROFILES_DIR=/app/dbt
-    depends_on:
-      ingestion:
-        condition: service_completed_successfully
-    networks:
-      - data-network
-
-  dbt-docs:
-    container_name: dbt-docs
-    build:
-      context: ./app/
-      dockerfile: src/incomes_dbt/Dockerfile
-    env_file:
-      - .env
-    volumes:
-      - ./app/src/incomes_dbt:/app/dbt
-    environment:
-      - DBT_PROFILES_DIR=/app/dbt
-    depends_on:
-      transform:
-        condition: service_completed_successfully
+      retries: 5
+      start_period: 5s
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
     command:
-      - bash
       - -c
       - |
-        dbt docs generate --profiles-dir /app/dbt && 
-        dbt docs serve --profiles-dir /app/dbt --port 8081 --host 0.0.0.0
-    networks:
-      - data-network
+        airflow db migrate && \
+        airflow users create \
+          --username admin \
+          --password admin \
+          --firstname admin \
+          --lastname user \
+          --role Admin \
+          --email admin@email.com || true
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
     ports:
-      - "8081:8081"
-
-  quality:
-    container_name: quality-app
-    build:
-      context: ./app
-      dockerfile: src/quality/quality.Dockerfile
+      - "8080:8080"
     depends_on:
-      ingestion:
+      airflow-init:
         condition: service_completed_successfully
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+  metabase:
+    image: metabase/metabase:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
     volumes:
-      - app_data:/app/data
-      - quality_data:/app/src/quality
-    networks:
-      - data-network
-
-volumes:
-  postgres_data:
-  app_data:
-  quality_data:
-
-networks:
-  data-network:
-    driver: bridge
+      - ./metabase-data:/metabase-data
+    environment:
+      - MB_DB_FILE=/metabase-data/metabase.db
+    depends_on:
+      - postgres
