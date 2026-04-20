@@ -25,8 +25,6 @@ x-airflow-common: &airflow-common
   depends_on:
     postgres:
       condition: service_healthy
-
-
 services:
 
   postgres:
@@ -43,8 +41,6 @@ services:
       interval: 5s
       retries: 5
       start_period: 5s
-
-
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
@@ -59,8 +55,6 @@ services:
           --lastname user \
           --role Admin \
           --email admin@email.com || true
-    
-
   airflow-webserver:
     <<: *airflow-common
     command: webserver
@@ -69,11 +63,20 @@ services:
     depends_on:
       airflow-init:
         condition: service_completed_successfully
-
-
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
     depends_on:
       airflow-init:
         condition: service_completed_successfully
+  metabase:
+    image: metabase/metabase:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./metabase-data:/metabase-data
+    environment:
+      - MB_DB_FILE=/metabase-data/metabase.db
+    depends_on:
+      - postgres
